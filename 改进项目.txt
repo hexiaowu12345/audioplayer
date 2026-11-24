@@ -1,0 +1,678 @@
+========== 播放器改进清单（2026-11-09 更新） ==========
+
+[✔ 已完成] 1. 播放熔断
+  连续 5 首播放失败（元数据读不出 / 播放进程秒退）会自动熔断并暂停，
+  等待用户输入 next / last / switch / rescan / replay / quit。
+  熔断时停在失败那首，不会一路刷屏把用户重新 rescan 的机会冲掉。
+
+[✔ 已完成] 2. 详细歌曲信息（参考截图里的 Poweramp 音频信息弹窗）
+  新增 info 命令，展示：标题 / 艺术家 / 专辑 / 年份 / 流派 / 音轨号 /
+  文件格式 / 编码 / 位深 / 采样率 / 码率 / 声道 / 时长 / 文件大小 /
+  封面有无 / 编码器 / 输出设备 / 完整路径。
+  参考截图已用 OCR 确认字段，USB 声卡型号在可读时显示。
+
+[✔ 已完成] 3. 自定义歌单
+  pls 列出歌单；pl new / del / rename / show / add / rm / play。
+  歌单保存在 playlists.json，只记录路径（不复制、不删除歌曲文件），
+  自动跳过已被删掉的文件；添加时按路径去重。
+
+[✔ 已完成] 4. 整体循环
+  新增 listloop（别名 lc / cycle）：播完最后一首自动回到第一首。
+  与单曲循环互斥，随机播放优先级最高。
+
+[✔ 已完成] 5. 检测报错兼容
+  缺少 ffplay / mpv / ffprobe 时不再抛 RuntimeError 崩溃，
+  改为启动前检查 + 中文提示 + 对应平台的安装命令。
+
+[✔ 已完成] 6. 音频比特率显示修复
+  改为优先取音频流自身 bit_rate（原来用容器码率，把封面 / ID3 / 歌词
+  一起算进去了）。实测 Chronomia.mp3：272 kbps → 256 kbps（正确）。
+
+[✔ 已完成] 7. USB 独占输出检测（可选功能）
+  新增 usb 命令：检测声卡、Root 状态、USB 声卡及支持的采样率；
+  usb on|off 可在 root + USB 声卡环境下切换 ALSA 直通，
+  失败时用 usb off 即可回退（也受播放熔断保护）。
+  非 root / 无法读取 /proc/asound 时只提示，不影响正常播放。
+
+[✔ 已完成] 8. 扫描速度优化（原 core/screen 待测方案 → 混合方案落地）
+  元数据读取改为 mutagen 优先、ffprobe 兜底：
+    125 首全量：13.98s → 1.43s，约 10 倍（112.7 → 11.6 ms/首）
+    mutagen 命中 123/124，个别 m4a/wav 自动回退 ffprobe，覆盖率保持 100%
+    无 mutagen 环境自动全走 ffprobe，行为与原来一致
+    缺 ffprobe 但装了 mutagen 时只警告、不阻止启动
+  顺带修正：FLAC 码率显示 1269 kbps（真实音频码率），不再用含标签的 ≈1295；
+  OGG 的标题/艺术家现在能正确读出（ffprobe 读不到时）。
+
+[✔ 已完成] 9. 帮助分层 + 全半角兼容 + 歌单切换
+  帮助分层：help 默认只显示表层基础命令；另有 play(播放控制) / pl(歌单) /
+    set(设置) / sys(系统) 四个分类，help <分类> 看详情，help all 看全部；
+    所有旧命令写法全部保留可用。
+  两种用法：一行式 play-loop / 设置-usb / pl-add ...；
+    或输入分类名进入（提示符变为 ♬ 播放 >），back / .. / cd .. 返回，
+    cd <分类> 进入；分类内可直接敲命令，表层命令也始终可用，quit 仍退程序。
+  全角兼容：只做 ？→? 和行首 ＋→+ 两个转换；全角数字不转（保持严格输入）。
+  纠错提示：未知指令用相似度提示最接近的命令，只提示、绝不自动执行。
+  歌单切换：pl <歌单名> 直接切换；内置"默认"歌单（记录首次扫描到的全集），
+    pl 默认 切回；歌单名查重（忽略大小写与首尾空格），"默认"为保留名，
+    重名或保留名一律拒绝创建/重命名。status 增加当前歌单显示。
+
+新增命令速查：
+  info (i)          当前歌曲详细信息
+  status (st)       播放状态（循环 / 随机 / 连续失败数）
+  listloop (lc)     列表循环
+  pl ...            自定义歌单（pl help 查看用法）
+  usb [on|off]      USB 音频检测 / 独占输出
+
+测试记录：
+  - 6 个损坏 mp3：第 5 首触发熔断，next 可继续，quit 正常退出
+  - 3 个短 wav：顺序播放正常，listloop 播完正确环回第 1 首
+  - 125 首真实曲库：info / status / seek / loop / pls / usb 全部正常
+  - 清空 PATH：依赖缺失时友好提示，不崩溃
+  - 歌单：新建 / 添加 / 去重 / 移除 / 重命名 / 删除 / 播放 全部通过
+
+
+========== 播放器改进清单（2026-11-17 追加） ==========
+
+[新] 10. USB 独占输出（无 root，termux-usb + usbfs 等时流）
+  背景：本机没有 root，/dev/snd 和 /proc/asound 都读不到，
+        之前 usb on 走的 ALSA 直通（usbaudio.py）在这台机器上根本用不了。
+  新链路（全部由播放器自己发起）：
+    ffmpeg 解码裸 PCM  ──管道──▶  usbsink  ──usbfs 等时 URB──▶  CX31993+MAX97220
+                                    ▲
+                termux-usb -r -E -e usbsink-launch /dev/bus/usb/001/002
+                                    │
+                        Android 弹「允许 termux 访问 CX31993+MAX97220 吗」
+                                    │  你点【确定】
+                                    ▼
+                        usbsink 拿到设备 fd → CLAIMINTERFACE
+                        （内核 snd-usb-audio 让出接口 → 真独占，数据不进 AudioFlinger）
+
+  实测设备信息（usbprobe 抓的描述符，2026-11-17）：
+    VID:PID = 06cb:1594  "CX31993+MAX97220"  USB 2.0 / UAC2
+    音频控制接口 = 0，时钟源 ClockID = 0x09（内部可编程）
+    播放流接口 = 1，播放端点 = 0x01（等时 OUT，synchronous）
+      alt1 = 16bit（单包 192 字节/ms）
+      alt2 = 24bit（单包 288 字节/ms）
+      alt3 = 32bit（单包 384 字节/ms）
+    => 单包上限决定了 24bit 最高约 48 kHz；位深按源文件选，不无谓升位深。
+    另有接口 2（录音，端点 0x81）和接口 3（HID 按键，端点 0x83），暂不使用。
+
+  新增文件：
+    tools/usbprobe.c    描述符探针（只读，不改设备状态）
+    tools/usbsink.c     独占输出进程：claim → 设时钟采样率 → 等时 URB 送 PCM
+    tools/build.sh      编译到 ~/audioplayer_usb/bin（/sdcard 是 noexec，不能就地执行）
+    tools/usbtest.sh    硬件自测：直接放 3 秒正弦波
+    utils/usbdac.py     播放器侧封装（申请权限 / 选格式 / ffmpeg+usbsink 一根管子）
+
+  细节处理：
+    - 44.1k 不是 1ms 的整数倍：按 44/45 帧交替分帧（0.001 累加器），不重采样。
+    - 暂停走 SIGUSR1 → 切 alt 0 真正断流（不是憋着不发包）；
+      续播 SIGUSR2 → 重新开流，支持无缝续播。
+    - 退出时 set alt 0 + RELEASEINTERFACE，把接口交还内核驱动，
+      否则拔插前系统音频会是哑的。
+    - 起播前先攒 1/4 缓冲再开闸，避免第一包补静音造成爆音。
+    - USB 起不来（没插/没授权/没编译）自动回退 mpv，不影响正常听歌。
+
+  用法：
+    bash tools/build.sh                 # 编译
+    usb                                 # 看状态
+    usb on                              # 弹窗授权并开启（点确定）
+    usb off                             # 回退系统输出
+    usb probe                           # 只读探测时钟支持范围
+    bash tools/usbtest.sh 48000 24 3    # 不经播放器，直接放正弦波自测
+
+
+========== 播放器改进清单（2026-11-17 第二批） ==========
+
+[新] 11. 极致完美输出（perfect / pure / hifi）
+  一次输入开启，再输入关闭，状态存进 progress.json，下次启动依然有效。
+  开启后的行为：
+    采样率  强制用音频文件自己的采样率 —— 绝不重采样，比特率也就等于源比特率
+    精度    内部 float32 计算，送出 32 bit（alt3），中途不截断、不抖动
+    处理    不加 EQ、不做动态、不做响度归一、不混音，解出来是什么就送什么
+    位深    设备端点单包容量不够时逐级降 32 -> 24 -> 16 并明确提示
+            实测这枚小尾巴 alt 上限：16bit 192B/ms、24bit 288、32bit 384
+            => 48kHz 是它的天花板；88.2k/96k 会提示“无法零处理输出”并降到 48k
+  关闭后（普通独占）：位深跟源文件走（16 位就走 16 位 alt），超范围回落 48kHz。
+
+[新] 12. 音量：硬件音量（50 刻度）与软件音量可切换
+  vol            查看当前音量与方式
+  vol 60        设为 60%（自动对齐到 2% 一格，共 50 格）
+  vol + / vol - 一格一格调（每格 2%）
+  vol hw        用硬件音量：UAC2 Feature Unit（unit 2，channel 0）SET_CUR，
+                0 dB 在顶端，按 1/256 dB 线性映射到 -60 dB，0% 时顺带 mute。
+                走控制 FIFO 实时改，播放中立刻生效，且零软件衰减不损精度。
+  vol sw        用软件音量：ffmpeg volume 滤镜，float 计算，按平方曲线（等响）
+                优点：一定能用、能小数级微调；缺点：极致完美输出下也算一次处理，
+                且改音量要等下一首才生效。
+  实际硬件是否支持硬件音量，usbsink 启动时会 GET_RANGE 探测并写进日志，
+  不支持会提示自动建议 vol sw。
+
+[新] 13. 状态持久化 + 启动自动申请 + 关闭释放
+  以前设置存在 usb_exclusive.json，现在统一写进 progress.json 的 settings 段：
+    usb_exclusive / usb_device / perfect_output / volume_mode / volume_step
+  save_progress() 改成读-改-写，不会再把手动开的设置冲掉。
+  启动规则（按需求）：
+    上次关了          -> 什么都不做
+    开着但没插小尾巴  -> 不弹窗，只提示；插上后播放时自动申请
+    开着且插着        -> 立刻确认授权（授权过一次就不再弹）
+  usb off 时如果正在独占播放，会先停止播放让 usbsink 退出 ——
+  usbsink 退出前一定 set alt 0 + RELEASEINTERFACE，
+  snd-usb-audio 重新接管，AudioFlinger 立刻能正常出声。
+
+  控制链路补充：
+    暂停 SIGUSR1 -> set alt 0 真正断流；续播 SIGUSR2 -> 重新开流（无缝）
+    音量 FIFO：播放器在 $TMPDIR 建 usbsink_<pid>.ctl，写 'V'+百分比，
+    usbsink 在主循环和暂停等待里都会 poll 它（O_RDWR|O_NONBLOCK，不阻塞）
+
+
+========== 播放器改进清单（2026-11-17 第三批：兼容性 A+B） ==========
+
+[新] 14. 拓扑自动解析（A）—— 从"只认这一枚尾巴"变成"任意 UAC1/UAC2 尾巴"
+  以前 usbsink.c 里把 ClockID=9、流接口=1、端点 0x01、FeatureUnit=2、
+  alt 包长 192/288/384 全写死了，换设备就废。
+  现在：
+    tools/usbprobe.c 重写成真正的描述符解析器，输出一行 JSON：
+      vid/pid/manufacturer/product/uac2
+      ac_iface/as_iface/ep_out/clock_id/unit_id/has_volume/capture_iface
+      alts: [{alt, bytes, bits, mps, interval}]  —— 16/24/32bit 各自对应哪个 alt
+    解析要点：
+      · 靠 bInterfaceProtocol=0x20 或 AC header 的 bcdADC>=0x0200 判 UAC1/UAC2
+      · UAC2 的 FORMAT_TYPE_I 与 UAC1 的字段偏移不同，分别取 subslot/bits
+      · 只认"等时 OUT 端点所在的 AS 接口"，录音接口(IN 端点)单独标记不用
+      · 音量能力看 Feature Unit 的 bmaControls[0] 的 D1(Volume) 位
+    usbprobe 还有两个额外模式：
+      json       只吐 JSON（播放器用）
+      parse-hex  离线解析：把十六进制描述符喂进去就能验证解析器（不需要设备）
+  播放器侧：探测结果缓存在 usb_devices.json（profiles: vid:pid -> 拓扑，paths: 路径 -> vid:pid），
+    没探测过的设备用内置兜底档案（就是这台 CX31993+MAX97220 的实测值），
+    所以"没探测也能用、探测了就精确"。
+  向下传递：拓扑变成 usbsink 的命令行参数（环境变量 USBSINK_TOPO 经启动器转发）：
+    --ac-iface --as-iface --ep --clock --unit --uac --has-vol
+    --alt16 --alt24 --alt32 --mps16 --mps24 --mps32
+  usbsink 同时支持两种采样率控制：
+    UAC2：AC 接口类请求打到时钟源实体（CS 0x01 SET_CUR / GET_CUR / GET_RANGE，4 字节）
+    UAC1：端点上的 SAMPLING_FREQ 请求（0x22/0xA2，wIndex=端点，3 字节）
+  验证方式（离线，不需要插设备）：
+    ./usbprobe parse-hex < 描述符dump.txt
+    本机实测输出与写死值完全一致：ac_iface=0 as_iface=1 ep=0x01 clock=9
+    unit=2 has_volume=true alts=16bit(192)/24bit(288)/32bit(384)，UAC2
+  另外 usbsink 加了 topo 自检模式（不需要设备也能回显解析结果）：
+    usbsink topo --ac-iface 0 --as-iface 2 --ep 0x03 --clock 41 ...
+
+[新] 15. 多设备白名单（B）
+  新指令（与 usb 同级）：
+    usblist (usbdev)          列出所有设备 + 已缓存身份 + 标出当前选中
+    usbuse <编号|VID:PID|路径> 指定用哪个设备（写入 progress.json 的 usb_device/usb_vidpid）
+  选设备优先级（utils/usbdac.pick_device）：
+    1) 调用方指定路径  2) 上次用的路径  3) 上次用的 VID:PID 现在挂哪个口  4) 唯一设备
+    —— 所以拔了插到别的口、或另一个口插了别的东西，照样能找回原来那枚尾巴
+  usb on 也会按白名单选，不再无脑取第一个。
+
+[兼容性收尾]
+  · sys.platform 在这台 Termux 上其实是 android（不是 linux），平台判定已修
+  · 无 termux-usb / 无 mkfifo / 无 SIGUSR1/2 的环境：能力检测降级，
+    命令给明确提示，起播 1 秒自检失败自动回退 mpv
+  · progress.json 三种情况都测过：老格式(只有 file/position)、带 settings、
+    内容损坏 —— 都能读、都能写回干净结构
+  · 设备不接受某采样率 -> usbsink 返回 6 退出（宁可回退也不变速错放）
+
+
+========== 播放器改进清单（2026-11-17 第四批：三平台共存） ==========
+
+[新] 16. Windows / 桌面 Linux / Termux 共存
+  结论：能共存。约定是「主体功能三平台一致，USB 独占只在 Termux 生效」。
+
+  分层：
+    与平台无关（三边都跑）
+      core/（扫描、元数据、播放控制、引擎、命令行）
+      module/（播放控制、歌单、系统指令、帮助）
+      strings/ utils/storage.py utils/formatter.py utils/playlists.py
+    平台相关，缺失即降级
+      utils/usbdac.py    Termux 专有，缺 termux-usb 就整体失效但不报错
+      utils/usbaudio.py  老的 root+ALSA 方案，留着但默认不用
+      utils/compat.py    新增：兼容性自检（报告 + 降级模拟）
+      tools/*.c          Termux 才能编译（/sdcard 还是 noexec，必须编译到 $HOME）
+
+  这次为此做的改动：
+    1) get_forced_device() 加了"平台闸门"should_try_usb()
+       平台不支持时只提示一次，不再每首歌刷一遍"回退系统输出"
+    2) run.py 默认音乐目录三分支
+       Windows -> C:\music
+       Termux/Android -> /sdcard/下载、/sdcard/qqmusic、/sdcard/我的文件
+       桌面 Linux/macOS -> ~/Music、~/音乐、~/Downloads
+    3) 扫描缓存跨平台筛一遍
+       缓存是从别的系统/设备带来的路径时：存活 <80% 自动重新扫描，
+       存活 >=80% 就只跳过失效的那几首（实测 125 首里 80 首还在 -> 重扫成 90 首）
+    4) 缺失文件不再返回假元数据
+       get_audio_metadata() 对不存在的路径返回 None，走"跳过该曲"分支，
+       而不是先打一行"正在播放"再播失败
+    5) 平台能力集中声明（utils/usbdac.py 顶部）
+       IS_WINDOWS / IS_ANDROID / HAS_TERMUX_USB / HAS_MKFIFO / _SIG_PAUSE...
+       缺信号、缺 mkfifo、缺 termux-usb 全部优雅退化
+
+  新增自检入口（两条等价）：
+    python tools/compat_check.py     命令行跑
+    compat                           播放器内跑（sys 分类，别名"兼容"）
+  报告内容：操作系统 / Python / 独占可用性 / termux-usb / 工具编译 / mkfifo /
+            信号 / 播放器 / ffprobe / mutagen / progress.json
+            + 5 项降级模拟（无 termux-usb、无 mkfifo、无 SIGUSR、跨平台残留路径、无拓扑缓存）
+
+  当前自检结果（本机 Termux）：全部 ✔，结论"三平台可以共存"。
+
+  共享状态文件的安全性：
+    progress.json      纯字符串 + settings，读不到/坏掉都走默认值
+    scan_cache.json    路径列表，加载时按存在性筛
+    usb_devices.json   只存字符串拓扑，别的平台读了也不会用
+    playlists.json     路径列表，同样按存在性自动跳过失效项
+
+
+========== 播放器改进清单（2026-11-17 第五批：三端独占输出） ==========
+
+[更正] 上一批写的"USB 独占仅在 Termux 生效"是错的。
+  独占输出三端都有，差的只是机制。现在按后端抽象成同一件事：
+    Android / Termux : termux-usb + usbfs 等时流（tools/usbsink.c，绕过 AudioFlinger）
+    桌面 Linux/macOS : ALSA hw: 直通（mpv --ao=alsa --audio-device=alsa/hw:N,0，绕过 Pulse/QipeWire）
+    Windows          : WASAPI 独占（mpv --ao=wasapi --audio-exclusive=yes，绕过 Windows 混音器）
+
+[新] 17. 独占输出后端抽象（utils/exclusive.py）
+  一个模块管三件事：后端识别、设备枚举/选择、mpv 独占参数生成。
+    detect_backend() -> 'termux' | 'alsa' | 'wasapi' | 'none'
+    available()      后端能不能用（Termux 看 termux-usb，其余看有没有 mpv）
+    get_config()     progress.json 里 ex_enabled / ex_backend / ex_device / ex_mixer
+    list_mpv_devices()  解析 mpv --audio-device=help，只取直通设备
+                        ALSA 只收 alsa/…hw:… ；WASAPI 只收 wasapi/…
+    guess_device()   从设备名里猜外接 DAC（usb/dac/xmos/speaker/耳机/扬声器…）
+    mpv_args()       完美输出时追加 --audio-format=s32 与
+                     --audio-samplerate=<源采样率>，锁住源格式不重采样
+    hw_volume_supported() / set_hw_volume()
+                     Termux -> UAC2 Feature Unit（usbsink 内部做）
+                     Linux  -> amixer -c N sset <控件> X%（自动挑 PCM/Master/Speaker）
+                     Windows-> 无命令行端点音量接口，只能软件音量
+
+  命令层完全复用，用户侧感觉不到区别：
+    usb            面板按后端显示不同内容（Termux 显示描述符档案，其余显示直通设备）
+    usb on         Termux 弹授权；Linux/Windows 直接选设备并记住
+    usb off        三端一样：关掉并释放（Termux 还会把接口还给内核驱动）
+    usb test       三端都能放 3 秒正弦波（Termux 用 usbsink tone，其余用 mpv lavfi）
+    usblist        三端都能列设备（Termux 用 termux-usb -l，其余用 mpv 设备表）
+    usbuse <n|id>  三端都能指定设备
+    perfect        三端都生效：Termux -> 32bit alt 直送；mpv -> --audio-format=s32
+                   + --audio-samplerate=<源采样率>
+    vol hw/sw      三端都能切；hw 在 Windows 会明确说"只能用软件音量"
+
+  设置键名统一：老键 usb_exclusive/usb_device 与新键 ex_enabled/ex_device
+  同写同读，所以升级后老设置不会丢，回退旧版本也能认。
+
+  本机自检（compat）现在包含三后端模拟，实测：
+    Termux 后端  可用，硬件音量走 UAC2 Feature Unit
+    模拟 Linux   mpv 参数：--ao=alsa --audio-device=dummy/hw:1,0
+                 --audio-format=s32 --audio-samplerate=44100
+    模拟 Windows mpv 参数：--ao=wasapi --audio-exclusive=yes
+                 --audio-device=… --audio-format=s32 --audio-samplerate=44100
+  注意：Termux 上 mpv 也有 alsa 输出，但拿不到 /dev/snd 权限，
+  所以 Android 仍必须走 usbfs 那条路，这点没变。
+
+[补] 18. Windows 端点音量（pycaw）
+  utils/exclusive.py 加 _windows_endpoint()：用 pycaw 拿默认播放设备的
+  IAudioEndpointVolume，set_hw_volume() 调 SetMasterVolumeLevelScalar。
+    · 兼容两代 pycaw 写法：新版 spk.EndpointVolume；老版 Activate+cast
+    · 结果缓存，避免每次调音量都重新初始化 COM
+    · 没装 pycaw / 不在 Windows / 初始化失败都只返回 (False, 原因)，不抛异常
+    · 另加 get_hw_volume() 读回当前硬件音量
+  依赖（只在 Windows 上需要）：
+    pip install pycaw comtypes
+  已知限制（写进 vol hw 的提示里）：
+    WASAPI 独占会绕过 Windows 音频引擎，部分声卡此时端点音量可能不生效；
+    遇到这种情况用 vol sw 改走软件音量。
+  用法不变：vol hw 选硬件音量，vol 60 设 60%，vol + / vol - 一格一格（50 格）。
+
+
+========== 播放器改进清单（2026-11-17 第六批：截图反馈的三个问题） ==========
+
+[修] 19. 探测命令参数传错（"弹窗都没有"的直接原因之一）
+  原来：termux-usb -r -E -e usbprobe <设备> json
+        termux-usb 的 -e 只能接一条命令，多出来的 json 会被判成多余参数，
+        探测根本跑不起来，于是既没弹窗也没数据。
+  现在：模式改走环境变量 USBPROBE_MODE=json，命令行只有设备路径：
+        USBPROBE_MODE=json termux-usb -r -E -e usbprobe <设备>
+        usbprobe.c 里模式优先取 argv[1]，没给就读 USBPROBE_MODE。
+
+[修] 20. 授权失败只说"No such device"，看不出怎么办
+  新增 _explain_failure()：把原始报错翻成人话，例如
+    No such device     -> 设备句柄失效：设备在列表里但系统不让 open，
+                          多半是上次独占断开后系统没放开，拔插一次就好
+    permission denied  -> 请在弹窗点确定（没弹窗就用 usb test 触发）
+    busy               -> 被别的程序占用，先 usb off / 退出其它播放器
+    无输出             -> termux-api 没响应，确认 Termux:API 应用已装
+  另外 No such device 会自动等 2 秒重试一次（偶尔系统只是慢半拍）。
+
+[修] 21. "48kHz 是它的上限"这句话有歧义，让人以为 44.1k 不支持
+  实际：44.1kHz 和 48kHz 都是原生直送（44.1k 按 44/45 帧交替分包，不重采样），
+        端点上限是 384 字节/ms，32bit@48k 正好用满，所以 88.2k/96k 才受限。
+  perfect 的说明改成按探测到的 alt 表动态算：
+    实际能力 : 16bit 最高 48.0 kHz / 24bit 最高 48.0 kHz / 32bit 最高 48.0 kHz
+    44.1kHz、48kHz 都是原生直送；更高的 88.2k/96k 超出端点容量，会明确提示并降级。
+
+[改] 22. 分类没约束力：在【播放控制】里直接敲 usb 也能执行
+  现在：分类内直接敲"本分类命令"仍可用（这是进入分类的意义），
+        但跨分类的裸命令会被拦下来并提示：
+          ⚠️ 你现在在【播放控制】分类里，而「usb」属于【设置】分类
+             先 back 回顶层再敲，或者显式写成 set-usb
+        显式写法（set-usb / 设置-usb）依然可用，那是明确意图。
+        表层命令（next / last / replay / quit …）任何分类里都能用。
+  提示文案同步改成：
+    ns_hint        本类命令可以直接输入（不用加前缀）；其它分类请先 back 或写 分类-命令
+    help_group_hint 进入方式: set   分类内可直接敲本类命令   跨分类: set-命令 或先 back
+
+
+========== 播放器改进清单（2026-11-17 第七批：系统音频被搞哑的事故处理） ==========
+
+[事故] 23. 开启独占后系统整个没声音，退出 Termux、拔掉耳机也不行，只能重启
+  根因（两个 bug 叠加）：
+    bug1 探针解析出了"空档案"
+        usbprobe 原来靠原始 GET_DESCRIPTOR 读配置描述符，
+        这台机器上 Android 的 usbfs 只回了 9 字节（配置头），
+        于是解析结果变成 UAC1 / 时钟源 -1 / 无音量 / alts=[]，
+        而这份空档案被当成"探测成功"缓存进了 usb_devices.json。
+    bug2 usbsink 拿着假参数硬操作设备
+        as_iface/ep 是 -1、alt 是 -1，代码却先 claim 再改采样率、再切 alt，
+        而且中途出错直接 return，没有把接口还给内核驱动。
+        内核侧的 snd-usb-audio 被顶掉后没重新绑回去，Android 音频 HAL 卡死，
+        连扬声器都不出声，只能重启恢复。
+
+  修复（四道闸门）：
+    1) usbprobe 改走 libusb 已解析好的结构（interface/endpoint 的 extra 字节），
+       不再自己发控制传输；并且做完整性校验：
+       as_iface<0 或 ep_out<0 或 alts 为空 -> 直接报错退出（退出码 5），
+       绝不输出/缓存半份档案。
+    2) usbdac 加 valid_profile()：档案必须能真拿去配硬件才算数；
+       不完整的一律当作"没探测过"，回落到内置档案；
+       档案带 _source 标记（cache=真探测过 / default=内置兜底）。
+       顺手清掉了这次污染的那份空档案。
+    3) usbsink 的安全闸门：
+       · claim 必须成功才继续；被内核驱动占用时默认"停止且不做任何修改"，
+         退出码 7，播放器据此回退系统输出（不再弄哑系统音频）
+       · 确需抢占必须显式 usb on force：走 USBDEVFS_DISCONNECT_CLAIM
+         （只针对 snd-usb-audio），并记住"我断开过"
+       · 任何退出路径（正常/信号/各种错误 return）统一走 release_iface():
+         alt 0 -> RELEASEINTERFACE -> USBDEVFS_CONNECT 重新绑定内核驱动
+       · force 模式下还要求拓扑必须是真探测过的（_source=cache），
+         否则拒绝启动，避免拿兜底参数去操作别的设备
+    4) 新增紧急恢复指令：set-usb panic
+       停独占播放 -> 关独占/force -> 打印恢复步骤：
+         a. 拔下小尾巴等 3 秒再插（最有效）
+         b. 开发者选项「停用 USB 音频转接」来回切一次
+         c. 开关蓝牙/插拔有线耳机，触发音频路由重算
+         d. 都不行只能重启（无 root 无法重启 audioserver）
+
+[修] 24. 分层没约束：顶层不带分类名也能执行
+  现在（也回答了上次那个"大问题"）：
+    表层命令（next/last/replay/quit/help/status/info…）任何地方直接敲
+    分类命令（usb/perfect/vol/usblist/usbuse/rescan/refresh/compat/loop…）
+      顶层必须写 分类-命令，或先进入分类
+      分类内可直接敲本分类命令
+      跨分类裸名一律拦截并提示写法
+  例：
+    usb                 -> ⚠️ 「usb」属于【设置】分类，顶层不能直接敲
+                            写法：set-usb   或先输入 set 进入分类
+    set-usb / set-usb on -> 正常执行
+    set 之后 usb on      -> 正常执行（本分类）
+
+
+========== 播放器改进清单（2026-11-17 第八批：退出自动释放独占） ==========
+
+[新] 25. 三层看门狗：用户把 Termux 划掉也能自动还接口
+  目标：不依赖 Python 的清理代码（划掉时 Python 根本没机会跑），由更底层兜住。
+  三层各管一段：
+
+  第 1 层 · usbsink 自带监视（C 层）
+    usbsink --watch-pid <播放器pid>
+      · 主循环 / 暂停等待里每轮都 kill(pid,0) 探测一次
+      · 播放器进程消失 -> 立刻 release_iface()（alt 0 -> RELEASEINTERFACE
+        -> USBDEVFS_CONNECT 重新绑定内核驱动）再退出
+    另外启动时 prctl(PR_SET_PDEATHSIG, SIGTERM)：
+      父进程(termux-usb)意外没了，也会收到 TERM 并走同样的收尾
+
+  第 2 层 · 启动器内嵌 shell 看门狗（Termux 会话层）
+    usbsink-launch 在 exec 之前先起一个后台子 shell：
+      while kill -0 $USBSINK_WATCH && kill -0 $SELF; do sleep 1; done
+      kill -TERM $SELF; sleep 3; kill -KILL $SELF
+    exec 后 $SELF 就是 usbsink 本身，所以这一层即使 C 层的循环卡住也能强制收摊。
+    实测（用 sleep 冒充 usbsink）：被监视进程一退出，1 秒内就打出了
+      [看门狗/shell] 播放器已退出，正在结束独占进程 2428
+    并且模拟进程确认已消失。
+
+  第 3 层 · usb_guard.sh（Termux 应用层兜底）
+    tools/usb_guard.sh：每 2 秒检查
+      1) 还有没有 audioplayer_usb/bin/usbsink 残留
+      2) pgrep com.termux 还在不在
+    只要 Termux 主进程没了而 sink 还在，就 pkill -TERM，3 秒后还在再 -KILL。
+    由播放器在启动独占时自动拉起（单实例，脚本内自己判断），也可手动 sh 运行。
+
+[新] 26. 进程内收摊 + 残留清扫
+  utils/usbdac.py 维护 _LIVE_SINKS 列表：
+    · atexit 注册 _kill_all_sinks — Python 正常退出/异常退出都会停 sink
+    · 接管 SIGTERM / SIGHUP / SIGINT：先还接口，再用原处理方式退出
+    · UsbSink.stop() 的等待时间从 1 秒放宽到 3 秒，给 release_iface 留足时间
+  sweep_sinks()：pkill -TERM 掉残留的 usbsink
+    · 启动播放器时自动跑一次（没开独占也会跑，顺手清上次崩溃的残留）
+    · 新指令 set-usb cleanup 可手动清
+
+  用法汇总（注意：顶层要带分类前缀）：
+    set-usb on / set-usb off
+    set-usb test / set-usb probe / set-usb force（写在 on 后面）
+    set-usb cleanup     清残留独占进程
+    set-usb panic       系统音频没声时的紧急恢复指引
+
+
+========== 播放器改进清单（2026-11-17 第九批：熔断被 USB 连坐） ==========
+
+[修] 27. 独占失败被当成"播放失败"，连挂 5 首触发熔断
+  现象：set-usb on 之后放歌，出现
+        ⚠ 播放失败 (1/5)…(2/5)… 一直到熔断
+  根因：
+    · 起播自检只看"进程还没死"（等 1 秒），而 termux-usb 报错往往晚一两百毫秒，
+      于是播放器以为独占成功，接着 ffmpeg 往死掉的管道写数据 -> 整首秒退
+    · 秒退在引擎里算"播放失败"，连挂 5 首 = 熔断
+    · 熔断原本是为"文件损坏/解码失败"设计的，这次被 USB 的次生问题连坐了
+  修复：
+    1) UsbPlayback.wait_ready(2.5)：必须看到 usbsink 日志里出现
+       "alt N 已激活" 才算真开流，否则抛错走回退（不再是"进程没死就算成功"）
+    2) note_usb_failure() / note_usb_success()：连续 2 次独占失败，
+       本次运行直接降级为系统输出（不改设置），避免每首歌白等两秒
+    3) Player.usb_died()：中途被拔/被系统收回时，引擎不记失败，
+       直接把这首用系统输出重放一次（只重放这一次）
+    4) 启动时若开着独占但设备没插：本次运行先禁用独占并提示，不弹窗、不白试
+    5) 熔断时如果这一轮和 USB 有关，额外打印：
+         ⚠️ 这一轮失败和 USB 独占有关：<原因>
+            独占问题不算文件损坏，输入 set-usb panic 可一键停独占
+            要继续听歌：输入 set-usb off 再 replay
+    6) 播放进程 stderr 落盘（$TMPDIR/audioplayer_last.log），
+       失败时打印 "↳ 播放器报错: …"。以前 mpv --really-quiet 把真正原因吞掉了。
+
+[实测] 独占开着但设备不可用时的表现：
+  第一次：打印原因 -> 自动回退系统输出 -> 正常放歌（不再算失败）
+  第二次：本次运行不再尝试独占 -> 直接系统输出
+
+[说明] 安全模式跑不出独占，这是 Android 的现实
+  Android 几乎总是把 snd-usb-audio 绑在 USB 声卡上，
+  所以"不抢占"的安全模式永远不会成功；真要独占必须 set-usb on force。
+  force 的保障：只断 snd-usb-audio、退出时 USBDEVFS_CONNECT 绑回去、
+  三层看门狗兜底、拓扑必须是真探测过的（否则拒绝启动）。
+
+[补] 28. 报错信息用独占进程自己的退出码
+  以前回退提示里显示的是 ffmpeg 的 224（管道被关的次生错误），看不懂。
+  现在取 usbsink 自己的退出码并翻译：
+    7 -> 接口正被内核驱动占用：默认不抢占，要用 usb on force
+    4 -> 和设备格式协商失败    5 -> URB 提交失败
+    6 -> 设备不接受该采样率    3 -> 没拿到设备 fd（授权没成功）
+
+
+========== 播放器改进清单（2026-11-17 第十批：为什么 Poweramp 能成功） ==========
+
+[查] 29. 与 Poweramp 的差异定位：force 模式其实一直没真正"整设备断开"
+  Poweramp 能做比特直通，靠的也是 usbfs（普通 App 无 root 只能走这条路）：
+    UsbManager 拿权限 -> UsbDeviceConnection.claimInterface(force=true)
+    force=true 在内核层就是 USBDEVFS_DISCONNECT_CLAIM
+  我们 force 模式有两个错：
+    1) flags 用错了：写的是 USBDEVFS_DISCONNECT_CLAIM_EXCEPT_DRIVER
+       （含意是"除了这个驱动以外的都断"），实际想断的是 snd-usb-audio，
+       应该用 USBDEVFS_DISCONNECT_CLAIM_IF_DRIVER。
+       结果这条 ioctl 从来没成功过，一直在走老的 USBDEVFS_DISCONNECT 兜底。
+    2) 只断 AS 接口(1)，不管 AC(0)/录音(2)。
+       snd-usb-audio 会因此处于"半死"状态：声卡节点还在，PCM 流没了。
+       Android 的 audio HAL 正好卡在这上面 —— 这就是那次"全系统没声、只能重启"的机理。
+  修复：
+    · flags 改成 IF_DRIVER，driver="snd-usb-audio"
+    · 新增 --ifaces "0,1,2"：把整块设备上被 snd-usb-audio 占的接口全断开
+      （拓扑缓存里的 ac_iface / as_iface / capture_iface 自动拼出来）
+    · 退出时按逆序逐个 USBDEVFS_CONNECT 绑回去，并打印每个接口的结果
+    · 断开后系统音频会短暂切到扬声器（这是正常现象，和 Poweramp 一样）
+
+[用] 30. 自测脚本支持强制模式
+  FORCE=1 bash tools/usbtest.sh 48000 24 3
+    -> 真的从内核驱动手里接管，响 3 秒正弦波，退出后驱动自动绑回
+  先跑这条，响了再 set-usb on force。
+
+
+========== 播放器改进清单（2026-11-17 第十一批：听到声音了） ==========
+
+[里程碑] 31. usbfs 独占真正出声（实测可听）
+  三个致命 bug 修完才通的：
+
+  bug1 force 没传到 usbsink
+    Python 塞进环境变量 USBSINK_FORCE，但启动器没转成 --force 参数，
+    所以"set-usb on force"永远退化成安全模式（日志里一直说"默认不抢占"）。
+    修：启动器转发 + usbsink 自己读 USBSINK_FORCE 兜底。
+
+  bug2 控制接口没接管，采样率/音量请求全被内核挡住
+    日志里的 "设置采样率失败: No such file or directory" / "音量 Broken pipe"
+    不是设备问题：usbfs 要求"类请求发往的控制接口"也被本进程 claim，
+    我们只 claim 了播放接口(1)。
+    修：claim 播放接口后顺带 claim 控制接口(0) 和录音接口(2)，退出时一并释放。
+
+  bug3 发包节拍错，7.7 倍速灌数据（没声/变调的主因）
+    原来 URB 一完成就立刻再提交，3 秒发了 6646 KB（应约 844 KB）。
+    修：加 1ms 节拍器（g_t0 + packets_due），URB 用 busy 标记，
+        "有到期包才发"，没到期就 500µs 后重试；主循环改成
+        先收完成 -> 再按节拍补发 -> 没活干才小睡。
+    实测：
+      48 kHz / 24 bit -> 281.8 KB/s（理论 288），欠载 0，异常 0
+      44.1 kHz / 16 bit -> 172.6 KB/s（理论 176.4），欠载 0，异常 0
+
+[新] 32. 采样率锁定（set-usb rate）
+  已知限制：UAC2 改采样率的请求 wIndex = (接口<<8)|实体号 = 0x0009，
+  这台 4.19 内核的 usbfs 校验时把低字节当接口号，找"接口 9" -> 拒绝(ENOENT)。
+  退回 UAC1 端点式请求又被设备 STALL(EPIPE)。所以播 44.1k 时设备可能仍是 48k。
+  折中：set-usb rate 48000 把"发包速率"锁到设备实际时钟上（代价是轻微变速）。
+    set-usb rate           查看
+    set-usb rate 48000     锁定
+    set-usb rate auto      跟随源文件
+
+[注意] 内核驱动绑不回来这件事
+  这台内核的 USBDEVFS_CONNECT 返回 ENOTTY（不支持），
+  所以 force 之后 snd-usb-audio 不会自动绑回，需要拔插一次小尾巴。
+  这也是"能不用 force 就不用"的原因。
+
+[下一步方向] 如果采样率锁不住 / 想彻底避开风险
+  改走 Android 的 direct/AAudio 输出（HAL 直通），
+  不抢内核驱动、不影响系统音频，也更像 Poweramp 的做法。
+
+
+========== 播放器改进清单（2026-11-17 第十二批：实际播放不通的真正原因） ==========
+
+[查] 33. "测试能响、实际播放不行"的真相
+  日志证据（~/tmp/output.txt）：
+    set-usb on probe   -> 只把开关打开了，没带 force
+    replay             -> [安全] 接口被 snd-usb-audio 占用 -> 回退系统输出
+  也就是说：测试脚本走的是 FORCE=1（真抢占，能响），
+  播放器走的是非 force（不抢占，永远回退）。两条路根本不是同一条。
+
+[修] 34. set-usb on 默认改成 force
+  理由：Android 一直绑着 snd-usb-audio，safe 模式等于"永远不独占"，
+  用户每次都要多打一个 force，太容易踩空。
+  现在：
+    set-usb on            强制独占（默认）
+    set-usb on safe       不抢占（只在设备空闲时才独占）
+    set-usb on force      上面第一种的显式写法
+    set-usb on probe      参数非法 -> 直接打用法，不再"静默当 on 处理"
+  开启后的提示也改了口径：
+    "播放期间系统/Poweramp 会没声（这是正常的，说明真独占了）"
+    "判断是否真独占：播放时打开 Poweramp/系统音乐应当没声"
+
+[修] 35. 硬件音量按通道逐个试
+  日志里的 "[音量] 设备未提供硬件音量控制（Broken pipe）"，
+  这枚设备的 Feature Unit 可能不支持 master(cn=0) 通道。
+  现在依次试 master / 通道1 / 通道2，并同时试两种 wIndex 写法；
+  还失败就用 vol sw（软件音量）。
+
+[实测] 播放器内真独占（force + 采样率锁 48000，源文件 44.1k/16bit）
+  usb_sink.log：
+    alt 1 已激活（16 bit / 2 ch / 48000 Hz 等时流）
+    1.0s 187.9 KB / 2.0s 375.6 KB / ... / 7.0s 1313.1 KB
+    欠载 0，异常 0
+  187.9 KB/s ≈ 48000×2ch×2B/1024 = 187.5 KB/s，节拍完全正确。
+
+[已知限制] 采样率还是改不动（内核 usbfs 拦 wIndex），
+  所以设备时钟只能靠 set-usb rate 去"迁就"。
+
+
+========== 播放器改进清单（2026-11-17 第十三批：一暂停就断开 / 音高不对） ==========
+
+[修] 36. "从独占开始全程播放异常"的真凶：暂停信号发错了进程
+  播放器 spawn 的是 termux-usb，usbsink 是它的子进程。
+  旧代码 pause() 把 SIGUSR1 发给 sink.proc.pid —— 也就是 termux-usb。
+  而 termux-usb 没有 SIGUSR1 的处理函数，默认动作就是"终止进程"！
+  termux-usb 一死，usbsink 收到 PDEATHSIG(SIGTERM) 也跟着收摊，
+  于是播放器看到"独占中途断开" → 切回系统输出。
+  日志特征：已暂停 → [USB] 独占中途断开（设备被拔或系统收回）
+  修复：
+    · usbsink 启动时把自己的真实 pid 写进 $USBSINK_PIDFILE
+    · 播放器的 pause/resume 改为读 pidfile 再发信号；读不到就"不动"，绝不乱发
+    · stop() 依然发给 termux-usb（那是正常终止整条链）
+  实测：pause → 日志出现 3 秒空档 → resume → 继续以 187.5 KB/s 稳定送流，
+        在播状态保持 True，不再出现"中途断开"。
+
+[新] 37. 预热法：让设备时钟也能对上（弥补采样率改不动）
+  思路：内核不让 App 发 UAC2 采样率请求，但内核驱动自己可以。
+        所以起播前先用系统输出播 1 秒"目标采样率的静音"（mpv + lavfi anullsrc），
+        ALSA 会把 USB 声卡时钟设到该采样率；随后我们抢占并按同一速率发数据。
+  实现：usbdac.warmup_rate(rate)
+        · 每次会话只预热一次（避免每首歌前面都静音一下）
+        · set-usb rate 仍然是"强制发包含速率"的开关；rate=0 时跟随源文件，
+          由预热把设备对到源的采样率
+        · 开关：set_warmup（默认开）
+  注意：预热只在"内核驱动还绑着"的时候有效，所以拔插一次小尾巴后效果最好。
+
+
+========== 2026-11-17 收尾决定：冻结 USB 独占，改走 AudioTrack ==========
+
+[决定] USB 独占路线冻结（代码保留、默认关闭、不再改动）
+  原因：这台 4.19 内核的 usbfs 有三道硬限制，逐条撞墙——
+    1) 采样率控制：UAC2 的 wIndex 低字节被当接口号校验 → ENOENT，改不了时钟
+    2) 驱动重绑：USBDEVFS_CONNECT 返回 ENOTTY（内核不支持）→ 抢占后驱动回不来
+    3) DISCONNECT_CLAIM 在 ALSA 刚放开设备时频繁失败 → 接口卡在 busy（半接管）
+  结果是"能出声但不稳定"，且每次退出都要拔插才能恢复系统音频，得不偿失。
+  所以：
+    · usbc 相关代码（tools/usbsink.c / usbprobe.c、utils/usbdac.py、utils/exclusive.py）
+      原样保留，作为实验功能，用 set-usb on 才会启用（默认关闭）
+    · 不再往这条路上加任何补丁
+
+[新] 38. 输出通道改为 AudioTrack / AAudio（尽量少的处理）
+  新增 utils/output.py：
+    默认 output_mode = 'audiotrack'
+      mpv 参数：--ao=aaudio --aaudio-performance-mode=low-latency --audio-channels=stereo
+      含义：走 Android 的 AAudio（底层就是 AudioTrack），不做我们自己的重采样/上混
+    极致完美输出（perfect）打开时追加：
+      --audio-format=float      AAudio 原生 float32，不再 s16 来回转
+      --audio-samplerate=<源>   让 HAL 按源采样率开流
+  指令：set-audio on / set-audio off     （查看直接 set-audio）
+  info / status / 启动横幅都会显示当前输出通道。
+
+[当前默认状态]
+  输出通道 : AudioTrack/AAudio 直通（低延迟，最少处理）
+  USB 独占 : 关（代码保留，实验性）
+  采样率锁 : 跟随源文件
+  极致完美 : 关（需要时 set-perfect 打开）
+  音量     : 100%（软件音量，USB 硬件音量随独占一起冻结）
